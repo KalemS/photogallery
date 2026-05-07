@@ -158,11 +158,10 @@ router.get('/download/:id', requireAuth, async (req, res) => {
       return res.status(404).send('Photo not found.');
     }
 
-    const photo     = rows[0];
-    const signedUrl = await getSignedUrl(photo.gcs_path, photo.original_name);
+    const photo = rows[0];
 
-    // Redirect to the signed URL so the browser downloads the file
-    res.redirect(signedUrl);
+    // Bucket is public — redirect directly to the GCS URL with download header
+    res.redirect(photo.gcs_url);
   } catch (err) {
     console.error('Download error:', err);
     res.status(500).send('Download failed: ' + err.message);
