@@ -1,44 +1,44 @@
 #!/bin/bash
 # ============================================================
 # GCE Startup Script – Cloud Photo Gallery
-# Attach this as the startup script when creating your VM.
+# Terraform injects values via instance metadata.
 # ============================================================
 set -e
 
 # ── 1. System updates & Node.js 20 LTS ──────────────────────
 apt-get update -y
-apt-get install -y curl git
+apt-get install -y curl git default-mysql-client
 
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt-get install -y nodejs
 
-# ── 2. Clone / update the app ───────────────────────────────
-APP_DIR=/opt/photo-gallery
-
-if [ -d "$APP_DIR/.git" ]; then
-  cd "$APP_DIR" && git pull
-else
-  # Replace the URL below with your own repo, or use gcloud scp to copy files
-  git clone https://github.com/YOUR_USERNAME/cloud-photo-gallery.git "$APP_DIR"
-fi
-
-cd "$APP_DIR"
-
-# ── 3. Install dependencies ─────────────────────────────────
-npm install --omit=dev
-
-# ── 4. Write .env from GCE metadata ─────────────────────────
-# Store secrets as instance metadata keys (gcloud compute instances add-metadata)
-PROJECT=$(curl -sf "http://metadata.google.internal/computeMetadata/v1/project/project-id" -H "Metadata-Flavor: Google")
-ZONE=$(curl -sf "http://metadata.google.internal/computeMetadata/v1/instance/zone" -H "Metadata-Flavor: Google" | awk -F/ '{print $NF}')
-
+# ── 2. Helper: read instance metadata ───────────────────────
 get_meta() {
   curl -sf "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1" \
     -H "Metadata-Flavor: Google" || echo ""
 }
 
+# ── 3. Clone / update the app ───────────────────────────────
+APP_DIR=/opt/photo-gallery
+APP_REPO=$(get_meta app_repo)
+
+if [ -d "$APP_DIR/.git" ]; then
+  cd "$APP_DIR" && git pull
+else
+  git clone "$APP_REPO" "$APP_DIR"
+fi
+
+cd "$APP_DIR"
+
+# ── 4. Install dependencies ─────────────────────────────────
+npm install --omit=dev
+
+# ── 5. Write .env from instance metadata ────────────────────
+# Cloud SQL private IP is passed as db_host. config/db.js uses
+# DB_HOST for TCP when DB_SOCKET_PATH is absent.
 cat > "$APP_DIR/.env" <<EOF
-DB_SOCKET_PATH=/cloudsql/$(get_meta db_connection_name)
+DB_HOST=$(get_meta db_host)
+DB_PORT=3306
 DB_USER=$(get_meta db_user)
 DB_PASSWORD=$(get_meta db_password)
 DB_NAME=$(get_meta db_name)
@@ -48,7 +48,13 @@ PORT=3000
 NODE_ENV=production
 EOF
 
-# ── 5. Install & configure PM2 (process manager) ───────────
+# ── 6. Initialize database schema (idempotent) ──────────────
+mysql -h "$(get_meta db_host)" \
+      -u "$(get_meta db_user)" \
+      -p"$(get_meta db_password)" \
+  < "$APP_DIR/sql/schema.sql" 2>/dev/null || true
+
+# ── 7. Install & configure PM2 (process manager) ────────────
 npm install -g pm2
 
 pm2 delete photo-gallery 2>/dev/null || true
@@ -56,7 +62,7 @@ pm2 start "$APP_DIR/app.js" --name photo-gallery
 pm2 save
 pm2 startup systemd -u root --hp /root | bash || true
 
-# ── 6. nginx reverse proxy on port 80 ───────────────────────
+# ── 8. nginx reverse proxy on port 80 ───────────────────────
 apt-get install -y nginx
 
 cat > /etc/nginx/sites-available/photo-gallery <<'NGINX'
@@ -65,6 +71,11 @@ server {
     server_name _;
 
     client_max_body_size 15M;
+
+    location /health {
+        proxy_pass  http://127.0.0.1:3000/health;
+        access_log  off;
+    }
 
     location / {
         proxy_pass         http://127.0.0.1:3000;
@@ -84,4 +95,4 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl restart nginx
 systemctl enable nginx
 
-echo "✓ Photo Gallery startup script complete."
+echo "Photo Gallery startup script complete."

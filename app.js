@@ -37,6 +37,11 @@ app.use(session({
 app.use('/',       require('./routes/auth'));
 app.use('/photos', require('./routes/photos'));
 
+// Health check — used by GCP load balancer and Terraform output validation
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // Root redirect
 app.get('/', (req, res) => {
   res.redirect(req.session.userId ? '/photos/gallery' : '/login');
